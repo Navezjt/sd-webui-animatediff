@@ -50,22 +50,46 @@ class AnimateDiffInfV2V:
         batch_size: int = 16,
         stride: int = 1,
         overlap: int = 4,
-        closed_loop: bool = True,
+        loop_setting: str = 'R-P',
     ):
         if video_length <= batch_size:
             yield list(range(batch_size))
             return
 
+        closed_loop = (loop_setting == 'A')
         stride = min(stride, int(np.ceil(np.log2(video_length / batch_size))) + 1)
 
         for context_step in 1 << np.arange(stride):
             pad = int(round(video_length * AnimateDiffInfV2V.ordered_halving(step)))
+            both_close_loop = False
             for j in range(
                 int(AnimateDiffInfV2V.ordered_halving(step) * context_step) + pad,
                 video_length + pad + (0 if closed_loop else -overlap),
                 (batch_size * context_step - overlap),
             ):
-                yield [e % video_length for e in range(j, j + batch_size * context_step, context_step)]
+                if loop_setting == 'N' and context_step == 1:
+                    current_context = [e % video_length for e in range(j, j + batch_size * context_step, context_step)]
+                    first_context = [e % video_length for e in range(0, batch_size * context_step, context_step)]
+                    last_context = [e % video_length for e in range(video_length - batch_size * context_step, video_length, context_step)]
+                    def get_unsorted_index(lst):
+                        for i in range(1, len(lst)):
+                            if lst[i] < lst[i-1]:
+                                return i
+                        return None
+                    unsorted_index = get_unsorted_index(current_context)
+                    if unsorted_index is None:
+                        yield current_context
+                    elif both_close_loop: # last and this context are close loop
+                        both_close_loop = False
+                        yield first_context
+                    elif unsorted_index < batch_size - overlap: # only this context is close loop
+                        yield last_context
+                        yield first_context
+                    else: # this and next context are close loop
+                        both_close_loop = True
+                        yield last_context
+                else:
+                    yield [e % video_length for e in range(j, j + batch_size * context_step, context_step)]
 
 
     def hack(self, params: AnimateDiffProcess):
@@ -76,7 +100,6 @@ class AnimateDiffInfV2V:
 
         def mm_cn_select(context: List[int]):
             # take control images for current context.
-            # controlllite is for sdxl and we do not support it. reserve here for future use is needed.
             if cn_script is not None and cn_script.latest_network is not None:
                 from scripts.hook import ControlModelType
                 for control in cn_script.latest_network.control_params:
@@ -108,11 +131,11 @@ class AnimateDiffInfV2V:
                         control.control_model.image_emb = control.control_model.image_emb[context]
                         control.control_model.uncond_image_emb_backup = control.control_model.uncond_image_emb
                         control.control_model.uncond_image_emb = control.control_model.uncond_image_emb[context]
-                    # if control.control_model_type == ControlModelType.Controlllite:
-                    #     for module in control.control_model.modules.values():
-                    #         if module.cond_image.shape[0] > len(context):
-                    #             module.cond_image_backup = module.cond_image
-                    #             module.set_cond_image(module.cond_image[context])
+                    if control.control_model_type == ControlModelType.Controlllite:
+                        for module in control.control_model.modules.values():
+                            if module.cond_image.shape[0] > len(context):
+                                module.cond_image_backup = module.cond_image
+                                module.set_cond_image(module.cond_image[context])
         
         def mm_cn_restore(context: List[int]):
             # restore control images for next context
@@ -148,10 +171,10 @@ class AnimateDiffInfV2V:
                         # control.control_model.uncond_image_emb_backup[context] = control.control_model.uncond_image_emb
                         control.control_model.image_emb = control.control_model.image_emb_backup
                         control.control_model.uncond_image_emb = control.control_model.uncond_image_emb_backup
-                    # if control.control_model_type == ControlModelType.Controlllite:
-                    #     for module in control.control_model.modules.values():
-                    #         if module.cond_image.shape[0] > len(context):
-                    #             module.set_cond_image(module.cond_image_backup)
+                    if control.control_model_type == ControlModelType.Controlllite:
+                        for module in control.control_model.modules.values():
+                            if module.cond_image.shape[0] > len(context):
+                                module.set_cond_image(module.cond_image_backup)
 
         def mm_sd_forward(self, x_in, sigma_in, cond_in, image_cond_in, make_condition_dict):
             x_out = torch.zeros_like(x_in)
@@ -161,7 +184,11 @@ class AnimateDiffInfV2V:
                 else:
                     _context = context
                 mm_cn_select(_context)
-                out = self.inner_model(x_in[_context], sigma_in[_context], cond=make_condition_dict(cond_in[_context], image_cond_in[_context]))
+                out = self.inner_model(
+                    x_in[_context], sigma_in[_context],
+                    cond=make_condition_dict(
+                        cond_in[_context] if not isinstance(cond_in, dict) else {k: v[_context] for k, v in cond_in.items()},
+                        image_cond_in[_context]))
                 x_out = x_out.to(dtype=out.dtype)
                 x_out[_context] = out
                 mm_cn_restore(_context)
@@ -237,7 +264,8 @@ class AnimateDiffInfV2V:
                     self.padded_cond_uncond = True
 
             if tensor.shape[1] == uncond.shape[1] or skip_uncond:
-                tensor = prompt_scheduler.multi_cond(tensor) # hook
+                prompt_closed_loop = (params.video_length > params.batch_size) and (params.closed_loop in ['R+P', 'A']) # hook
+                tensor = prompt_scheduler.multi_cond(tensor, prompt_closed_loop) # hook
                 if is_edit_model:
                     cond_in = catenate_conds([tensor, uncond, uncond])
                 elif skip_uncond:

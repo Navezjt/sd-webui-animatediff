@@ -4,8 +4,10 @@ import cv2
 import gradio as gr
 
 from modules import shared
+from modules.processing import StableDiffusionProcessing
 
 from scripts.animatediff_mm import mm_animatediff as motion_module
+from scripts.animatediff_i2ibatch import animatediff_i2ibatch
 
 
 class ToolButton(gr.Button, gr.components.FormComponent):
@@ -28,14 +30,13 @@ class AnimateDiffProcess:
         video_length=0,
         fps=8,
         loop_number=0,
-        closed_loop=False,
+        closed_loop='R-P',
         batch_size=16,
         stride=1,
         overlap=-1,
         format=["GIF", "PNG"],
         interp='Off',
         interp_x=10,
-        reverse=[],
         video_source=None,
         video_path='',
         latent_power=1,
@@ -56,7 +57,6 @@ class AnimateDiffProcess:
         self.format = format
         self.interp = interp
         self.interp_x = interp_x
-        self.reverse = reverse
         self.video_source = video_source
         self.video_path = video_path
         self.latent_power = latent_power
@@ -68,21 +68,50 @@ class AnimateDiffProcess:
 
     def get_list(self, is_img2img: bool):
         list_var = list(vars(self).values())
-        if not is_img2img:
+        if is_img2img:
+            animatediff_i2ibatch.hack()
+        else:
             list_var = list_var[:-5]
         return list_var
+
+
+    def get_dict(self, is_img2img: bool):
+        infotext = {
+            "enable": self.enable,
+            "model": self.model,
+            "video_length": self.video_length,
+            "fps": self.fps,
+            "loop_number": self.loop_number,
+            "closed_loop": self.closed_loop,
+            "batch_size": self.batch_size,
+            "stride": self.stride,
+            "overlap": self.overlap,
+            "interp": self.interp,
+            "interp_x": self.interp_x,
+        }
+        if motion_module.mm is not None and motion_module.mm.mm_hash is not None:
+            infotext['mm_hash'] = motion_module.mm.mm_hash[:8]
+        if is_img2img:
+            infotext.update({
+                "latent_power": self.latent_power,
+                "latent_scale": self.latent_scale,
+                "latent_power_last": self.latent_power_last,
+                "latent_scale_last": self.latent_scale_last,
+            })
+        infotext_str = ', '.join(f"{k}: {v}" for k, v in infotext.items())
+        return infotext_str
 
 
     def _check(self):
         assert (
             self.video_length >= 0 and self.fps > 0
         ), "Video length and FPS should be positive."
-        assert not set(["GIF", "MP4", "PNG"]).isdisjoint(
+        assert not set(["GIF", "MP4", "PNG", "WEBP"]).isdisjoint(
             self.format
         ), "At least one saving format should be selected."
 
 
-    def set_p(self, p):
+    def set_p(self, p: StableDiffusionProcessing):
         self._check()
         if self.video_length < self.batch_size:
             p.batch_size = self.batch_size
@@ -113,6 +142,7 @@ class AnimateDiffUiGroup:
         elemid_prefix = "img2img-ad-" if is_img2img else "txt2img-ad-"
         model_list = [f for f in os.listdir(model_dir) if f != ".gitkeep"]
         with gr.Accordion("AnimateDiff", open=False):
+            gr.Markdown(value="Please click [this link](https://github.com/continue-revolution/sd-webui-animatediff#webui-parameters) to read the documentation of each parameter.")
             with gr.Row():
 
                 def refresh_models(*inputs):
@@ -128,15 +158,24 @@ class AnimateDiffUiGroup:
                         selected = None
                     return gr.Dropdown.update(choices=new_model_list, value=selected)
 
-                self.params.model = gr.Dropdown(
-                    choices=model_list,
-                    value=(self.params.model if self.params.model in model_list else None),
-                    label="Motion module",
+                with gr.Row():
+                    self.params.model = gr.Dropdown(
+                        choices=model_list,
+                        value=(self.params.model if self.params.model in model_list else None),
+                        label="Motion module",
+                        type="value",
+                        elem_id=f"{elemid_prefix}motion-module",
+                    )
+                    refresh_model = ToolButton(value="\U0001f504")
+                    refresh_model.click(refresh_models, self.params.model, self.params.model)
+
+                self.params.format = gr.CheckboxGroup(
+                    choices=["GIF", "MP4", "WEBP", "PNG", "TXT"],
+                    label="Save format",
                     type="value",
-                    elem_id=f"{elemid_prefix}motion-module",
+                    elem_id=f"{elemid_prefix}save-format",
+                    value=self.params.format,
                 )
-                refresh_model = ToolButton(value="\U0001f504")
-                refresh_model.click(refresh_models, self.params.model, self.params.model)
             with gr.Row():
                 self.params.enable = gr.Checkbox(
                     value=self.params.enable, label="Enable AnimateDiff", 
@@ -161,7 +200,8 @@ class AnimateDiffUiGroup:
                     elem_id=f"{elemid_prefix}loop-number",
                 )
             with gr.Row():
-                self.params.closed_loop = gr.Checkbox(
+                self.params.closed_loop = gr.Radio(
+                    choices=["N", "R-P", "R+P", "A"],
                     value=self.params.closed_loop,
                     label="Closed loop",
                     elem_id=f"{elemid_prefix}closed-loop",
@@ -188,21 +228,6 @@ class AnimateDiffUiGroup:
                     label="Overlap",
                     precision=0,
                     elem_id=f"{elemid_prefix}overlap",
-                )
-            with gr.Row():
-                self.params.format = gr.CheckboxGroup(
-                    choices=["GIF", "MP4", "PNG", "TXT"],
-                    label="Save format",
-                    type="value",
-                    elem_id=f"{elemid_prefix}save-format",
-                    value=self.params.format,
-                )
-                self.params.reverse = gr.CheckboxGroup(
-                    choices=["Add Reverse Frame", "Remove head", "Remove tail"],
-                    label="Reverse",
-                    type="index",
-                    elem_id=f"{elemid_prefix}reverse",
-                    value=self.params.reverse
                 )
             with gr.Row():
                 self.params.interp = gr.Radio(
@@ -279,9 +304,7 @@ class AnimateDiffUiGroup:
                     type="pil",
                 )
             with gr.Row():
-                unload = gr.Button(
-                    value="Move motion module to CPU (default if lowvram)"
-                )
+                unload = gr.Button(value="Move motion module to CPU (default if lowvram)")
                 remove = gr.Button(value="Remove motion module from any memory")
                 unload.click(fn=motion_module.unload)
                 remove.click(fn=motion_module.remove)

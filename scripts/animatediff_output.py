@@ -4,6 +4,8 @@ from pathlib import Path
 import imageio.v3 as imageio
 import numpy as np
 from PIL import Image, PngImagePlugin
+import PIL.features
+import piexif
 from modules import images, shared
 from modules.processing import Processed, StableDiffusionProcessing
 
@@ -25,27 +27,22 @@ class AnimateDiffOutput:
             video_list = [image.copy() for image in res.images[i : i + params.video_length]]
 
             seq = images.get_next_sequence_number(f"{p.outpath_samples}/AnimateDiff", "")
-            filename = f"{seq:05}-{res.seed}"
+            filename = f"{seq:05}-{res.all_seeds[(i-res.index_of_first_image)]}"
             video_path_prefix = f"{p.outpath_samples}/AnimateDiff/{filename}"
 
             video_list = self._add_reverse(params, video_list)
             video_list = self._interp(p, params, video_list, filename)
             video_paths += self._save(params, video_list, video_path_prefix, res, i)
 
-
         if len(video_paths) > 0:
-            if not p.is_api:
-                res.images = video_paths
-            else:
-                # res.images = self._encode_video_to_b64(video_paths)
-                res.images = video_list
+            res.images = video_list if p.is_api else video_paths
 
     def _add_reverse(self, params: AnimateDiffProcess, video_list: list):
-        if 0 in params.reverse:
+        if params.video_length <= params.batch_size and params.closed_loop in ['A']:
             video_list_reverse = video_list[::-1]
-            if 1 in params.reverse:
+            if len(video_list_reverse) > 0:
                 video_list_reverse.pop(0)
-            if 2 in params.reverse:
+            if len(video_list_reverse) > 0:
                 video_list_reverse.pop(-1)
             return video_list + video_list_reverse
         return video_list
@@ -130,6 +127,8 @@ class AnimateDiffOutput:
     ):
         video_paths = []
         video_array = [np.array(v) for v in video_list]
+        infotext = res.infotexts[index]
+        use_infotext = shared.opts.enable_pnginfo and infotext is not None
         if "PNG" in params.format and shared.opts.data.get("animatediff_save_to_custom", False):
             Path(video_path_prefix).mkdir(exist_ok=True, parents=True)
             for i, frame in enumerate(video_list):
@@ -170,12 +169,35 @@ class AnimateDiffOutput:
                         ]
                     )
                 )
+                # imageio[pyav].imwrite doesn't support comment parameter
+                if use_infotext:
+                    try:
+                        import exiftool
+                    except ImportError:
+                        from launch import run_pip
+                        run_pip(
+                            "install PyExifTool",
+                            "sd-webui-animatediff GIF palette optimization requirement: PyExifTool",
+                        )
+                        import exiftool
+                    finally:
+                        try:
+                            exif_tool = exiftool.ExifTool()
+                            with exif_tool:
+                                escaped_infotext = infotext.replace('\n', r'\n')
+                                exif_tool.execute("-overwrite_original", f"-Comment={escaped_infotext}", video_path_gif)
+                        except FileNotFoundError:
+                            logger.warn(
+                                "exiftool not found, required for infotext with optimized GIF palette, try: apt install libimage-exiftool-perl or https://exiftool.org/"
+                            )
             else:
                 imageio.imwrite(
                     video_path_gif,
                     video_array,
+                    plugin='pillow',
                     duration=(1000 / params.fps),
                     loop=params.loop_number,
+                    comment=(infotext if use_infotext else "")
                 )
             if shared.opts.data.get("animatediff_optimize_gif_gifsicle", False):
                 self._optimize_gif(video_path_gif)
@@ -193,7 +215,27 @@ class AnimateDiffOutput:
                 imageio.imwrite(video_path_mp4, video_array, fps=params.fps, codec="h264")
         if "TXT" in params.format and res.images[index].info is not None:
             video_path_txt = video_path_prefix + ".txt"
-            self._save_txt(params, video_path_txt, res, index)
+            self._save_txt(video_path_txt, infotext)
+        if "WEBP" in params.format:
+            if PIL.features.check('webp_anim'):            
+                video_path_webp = video_path_prefix + ".webp"
+                video_paths.append(video_path_webp)
+                exif_bytes = b''
+                if use_infotext:
+                    exif_bytes = piexif.dump({
+                        "Exif":{
+                            piexif.ExifIFD.UserComment:piexif.helper.UserComment.dump(infotext, encoding="unicode")
+                        }})
+                lossless = shared.opts.data.get("animatediff_webp_lossless", False)
+                quality = shared.opts.data.get("animatediff_webp_quality", 80)
+                logger.info(f"Saving {video_path_webp} with lossless={lossless} and quality={quality}")
+                imageio.imwrite(video_path_webp, video_array, plugin='pillow',
+                    duration=int(1 / params.fps * 1000), loop=params.loop_number,
+                    lossless=lossless, quality=quality, exif=exif_bytes
+                )
+                # see additional Pillow WebP options at https://pillow.readthedocs.io/en/stable/handbook/image-file-formats.html#webp
+            else:
+                logger.warn("WebP animation in Pillow requires system WebP library v0.5.0 or later")
         return video_paths
 
     def _optimize_gif(self, video_path: str):
@@ -214,14 +256,12 @@ class AnimateDiffOutput:
                 logger.warn("gifsicle not found, required for optimized GIFs, try: apt install gifsicle")
 
     def _save_txt(
-        self, params: AnimateDiffProcess, video_path: str, res: Processed, i: int
+        self,
+        video_path: str,
+        info: str,
     ):
-        res.images[i].info["motion_module"] = params.model
-        res.images[i].info["video_length"] = params.video_length
-        res.images[i].info["fps"] = params.fps
-        res.images[i].info["loop_number"] = params.loop_number
         with open(video_path, "w", encoding="utf8") as file:
-            file.write(f"{res.images[i].info}\n")
+            file.write(f"{info}\n")
 
     def _encode_video_to_b64(self, paths):
         videos = []
