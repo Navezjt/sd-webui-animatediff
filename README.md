@@ -16,15 +16,20 @@ You might also be interested in another extension I created: [Segment Anything f
 - [Motion LoRA](#motion-lora)
 - [Prompt Travel](#prompt-travel)
 - [ControlNet V2V](#controlnet-v2v)
-- [HotShot-XL](#hotshot-xl)
+- [SDXL](#sdxl)
+- [Optimizations](#optimizations)
+  - [Attention](#attention)
+  - [FP8](#fp8)
+  - [LCM](#lcm)
+  - [Others](#others)
 - [Model Zoo](#model-zoo)
 - [VRAM](#vram)
 - [Batch Size](#batch-size)
-- [FAQ](#faq)
 - [Demo](#demo)
   - [Basic Usage](#basic-usage)
   - [Motion LoRA](#motion-lora-1)
   - [Prompt Travel](#prompt-travel-1)
+  - [AnimateDiff + SDXL](#animatediff--sdxl)
   - [ControlNet V2V](#controlnet-v2v-1)
 - [Tutorial](#tutorial)
 - [Thanks](#thanks)
@@ -52,9 +57,12 @@ You might also be interested in another extension I created: [Segment Anything f
 - `2023/10/19`: [v1.9.3](https://github.com/continue-revolution/sd-webui-animatediff/releases/tag/v1.9.3): Support webp output format. See [#233](https://github.com/continue-revolution/sd-webui-animatediff/pull/233) for more information.
 - `2023/10/21`: [v1.9.4](https://github.com/continue-revolution/sd-webui-animatediff/releases/tag/v1.9.4): Save prompt travel to output images, `Reverse` merged to `Closed loop` (See [WebUI Parameters](#webui-parameters)), remove `TimestepEmbedSequential` hijack, remove `hints.js`, better explanation of several context-related parameters.
 - `2023/10/25`: [v1.10.0](https://github.com/continue-revolution/sd-webui-animatediff/releases/tag/v1.10.0): Support img2img batch. You need ControlNet installed to make it work properly (you do not need to enable ControlNet). See [ControlNet V2V](#controlnet-v2v) for more information.
-- `2023/10/29`: [v1.11.0](https://github.com/continue-revolution/sd-webui-animatediff/releases/tag/v1.11.0): Support [HotShot-XL](https://github.com/hotshotco/Hotshot-XL) for SDXL. See [HotShot-XL](#hotshot-xl) for more information.
+- `2023/10/29`: [v1.11.0](https://github.com/continue-revolution/sd-webui-animatediff/releases/tag/v1.11.0): Support [HotShot-XL](https://github.com/hotshotco/Hotshot-XL) for SDXL. See [SDXL](#sdxl) for more information.
+- `2023/11/06`: [v1.11.1](https://github.com/continue-revolution/sd-webui-animatediff/releases/tag/v1.11.1): Optimize VRAM for ControlNet V2V, patch [encode_pil_to_base64](https://github.com/AUTOMATIC1111/stable-diffusion-webui/blob/master/modules/api/api.py#L104-L133) for api return a video, save frames to `AnimateDiff/yy-mm-dd/`, recover from assertion error, optional [request id](#api) for API.
+- `2023/11/10`: [v1.12.0](https://github.com/continue-revolution/sd-webui-animatediff/releases/tag/v1.12.0): [AnimateDiff for SDXL](https://github.com/guoyww/AnimateDiff/tree/sdxl) supported. See [SDXL](#sdxl) for more information. You need to add `--disable-safe-unpickle` to your command line arguments to get rid of the bad file error.
+- `2023/11/16`: [v1.12.1](https://github.com/continue-revolution/sd-webui-animatediff/releases/tag/v1.12.1): FP8 precision and LCM sampler supported. See [Optimizations](#optimizations) for more information. You can also optionally upload videos to AWS S3 storage by configuring appropriately via `Settings/AnimateDiff AWS`.
 
-For future update plan, please query [here](https://github.com/continue-revolution/sd-webui-animatediff/pull/224).
+For future update plan, please query [here](https://github.com/continue-revolution/sd-webui-animatediff/pull/294).
 
 
 ## How to Use
@@ -67,16 +75,16 @@ For future update plan, please query [here](https://github.com/continue-revoluti
 1. Go to txt2img if you want to try txt2gif and img2img if you want to try img2gif.
 1. Choose an SD1.5 checkpoint, write prompts, set configurations such as image width/height. If you want to generate multiple GIFs at once, please [change batch number, instead of batch size](#batch-size).
 1. Enable AnimateDiff extension, set up [each parameter](#webui-parameters), then click `Generate`.
-1. You should see the output GIF on the output gallery. You can access GIF output at `stable-diffusion-webui/outputs/{txt2img or img2img}-images/AnimateDiff`. You can also access image frames at `stable-diffusion-webui/outputs/{txt2img or img2img}-images/{date}`. You may choose to save frames for each generation into separate directories in `Settings/AnimateDiff`.
+1. You should see the output GIF on the output gallery. You can access GIF output at `stable-diffusion-webui/outputs/{txt2img or img2img}-images/AnimateDiff/{yy-mm-dd}`. You can also access image frames at `stable-diffusion-webui/outputs/{txt2img or img2img}-images/{yy-mm-dd}`. You may choose to save frames for each generation into separate directories in `Settings/AnimateDiff`.
 
 ### API
-Just like how you use ControlNet. Here is a sample. Due to the limitation of WebUI, you will not be able to get a video, but only a list of generated frames. You will have to view GIF in your file system, as mentioned at [WebUI](#webui) item 4. For most up-to-date parameters, please read [here](https://github.com/continue-revolution/sd-webui-animatediff/blob/master/scripts/animatediff_ui.py#L26).
+It is quite similar to the way you use ControlNet. API will return a video in base64 format. In `format`, `PNG` means to save frames to your file system without returning all the frames. If you want your API to return all frames, please add `Frame` to `format` list. For most up-to-date parameters, please read [here](https://github.com/continue-revolution/sd-webui-animatediff/blob/master/scripts/animatediff_ui.py#L26).
 ```
 'alwayson_scripts': {
   'AnimateDiff': {
     'args': [{
       'model': 'mm_sd_v15_v2.ckpt',   # Motion module
-      'format': ['GIF'],      # Save format, 'GIF' | 'MP4' | 'PNG' | 'WEBP' | 'TXT'
+      'format': ['GIF'],      # Save format, 'GIF' | 'MP4' | 'PNG' | 'WEBP' | 'WEBM' | 'TXT' | 'Frame'
       'enable': True,         # Enable AnimateDiff
       'video_length': 16,     # Number of frames
       'fps': 8,               # FPS
@@ -93,7 +101,8 @@ Just like how you use ControlNet. Here is a sample. Due to the limitation of Web
       'latent_scale': 32,     # Latent scale
       'last_frame': None,     # Optional last frame
       'latent_power_last': 1, # Optional latent power for last frame
-      'latent_scale_last': 32 # Optional latent scale for last frame
+      'latent_scale_last': 32,# Optional latent scale for last frame
+      'request_id': ''        # Optional request id. If provided, outputs will have request id as filename suffix
       }
     ]
   }
@@ -102,9 +111,10 @@ Just like how you use ControlNet. Here is a sample. Due to the limitation of Web
 
 
 ## WebUI Parameters
-1. **Save format** — Format of the output. Choose at least one of "GIF"|"MP4"|"WEBP"|"PNG". Check "TXT" if you want infotext, which will live in the same directory as the output GIF. Infotext is also accessible via `stable-diffusion-webui/params.txt` and outputs in all formats.
+1. **Save format** — Format of the output. Choose at least one of "GIF"|"MP4"|"WEBP"|"WEBM"|"PNG". Check "TXT" if you want infotext, which will live in the same directory as the output GIF. Infotext is also accessible via `stable-diffusion-webui/params.txt` and outputs in all formats.
     1. You can optimize GIF with `gifsicle` (`apt install gifsicle` required, read [#91](https://github.com/continue-revolution/sd-webui-animatediff/pull/91) for more information) and/or `palette` (read [#104](https://github.com/continue-revolution/sd-webui-animatediff/pull/104) for more information). Go to `Settings/AnimateDiff` to enable them.
     1. You can set quality and lossless for WEBP via `Settings/AnimateDiff`. Read [#233](https://github.com/continue-revolution/sd-webui-animatediff/pull/233) for more information.
+    1. If you are using API, by adding "PNG" to `format`, you can save all frames to your file system without returning all the frames. If you want your API to return all frames, please add `Frame` to `format` list.
 1. **Number of frames** — Choose whatever number you like. 
 
     If you enter 0 (default):
@@ -114,7 +124,7 @@ Just like how you use ControlNet. Here is a sample. Due to the limitation of Web
     If you enter something smaller than your `Context batch size` other than 0: you will get the first `Number of frames` frames as your output GIF from your whole generation. All following frames will not appear in your generated GIF, but will be saved as PNGs as usual. Do not set `Number of frames` to be something smaler than `Context batch size` other than 0 because of [#213](https://github.com/continue-revolution/sd-webui-animatediff/issues/213).
 1. **FPS** — Frames per second, which is how many frames (images) are shown every second. If 16 frames are generated at 8 frames per second, your GIF’s duration is 2 seconds. If you submit a source video, your FPS will be the same as the source video.
 1. **Display loop number** — How many times the GIF is played. A value of `0` means the GIF never stops playing.
-1. **Context batch size** — How many frames will be passed into the motion module at once. The SD1.5 motion modules are trained with 16 frames, so it’ll give the best results when the number of frames is set to `16`. SDXL HotShotXL motion modules are trained with 8 frames instead. Choose [1, 24] for V1 / HotShotXL motion modules and [1, 32] for V2 motion modules.
+1. **Context batch size** — How many frames will be passed into the motion module at once. The SD1.5 motion modules are trained with 16 frames, so it’ll give the best results when the number of frames is set to `16`. SDXL HotShotXL motion modules are trained with 8 frames instead. Choose [1, 24] for V1 / HotShotXL motion modules and [1, 32] for V2 / AnimateDiffXL motion modules.
 1. **Closed loop** — Closed loop means that this extension will try to make the last frame the same as the first frame.
     1. When `Number of frames` > `Context batch size`, including when ControlNet is enabled and the source video frame number > `Context batch size` and `Number of frames` is 0, closed loop will be performed by AnimateDiff infinite context generator.
     1. When `Number of frames` <= `Context batch size`, AnimateDiff infinite context generator will not be effective. Only when you choose `A` will AnimateDiff append reversed list of frames to the original list of frames to form closed loop.
@@ -193,23 +203,52 @@ For people who want to inpaint videos: enter a folder which contains two sub-fol
 AnimateDiff in img2img batch will be available in [v1.10.0](https://github.com/continue-revolution/sd-webui-animatediff/pull/224).
 
 
-## HotShot-XL
+## SDXL
 
-[HotShot-XL](https://github.com/hotshotco/Hotshot-XL) has identical architecture to AnimateDiff. The only 2 difference are
+[AnimateDiffXL](https://github.com/guoyww/AnimateDiff/tree/sdxl) and [HotShot-XL](https://github.com/hotshotco/Hotshot-XL) have identical architecture to AnimateDiff-SD1.5. The only 2 difference are
 - HotShot-XL is trained with 8 frames instead of 16 frames. You are recommended to set `Context batch size` to 8 for HotShot-XL.
-- HotShot-XL has fewer layers because of SDXL.
+- AnimateDiffXL is still trained with 16 frames. You do not need to change `Context batch size` for AnimateDiffXL.
+- AnimateDiffXL & HotShot-XL have fewer layers compared to AnimateDiff-SD1.5 because of SDXL.
+- AnimateDiffXL is trained with higher resolution compared to HotShot-XL.
 
-Although HotShot-XL has identical structure with AnimateDiff, I strongly discourage you from using AnimateDiff for SDXL, or using HotShot for SD1.5 - you will get severe artifect if you do that. I have decided not to supported that, despite the fact that it is not hard for me to do that.
+Although AnimateDiffXL & HotShot-XL have identical structure with AnimateDiff-SD1.5, I strongly discourage you from using AnimateDiff-SD1.5 for SDXL, or using HotShot / AnimateDiffXL for SD1.5 - you will get severe artifect if you do that. I have decided not to supported that, despite the fact that it is not hard for me to do that.
 
-Technically all features available for AnimateDiff are also available for HotShot-XL. However, I have not tested all of them. I have tested infinite context generation and prompt travel; I have not tested ControlNet. If you find any bug, please report it to me.
+Technically all features available for AnimateDiff + SD1.5 are also available for (AnimateDiff / HotShot) + SDXL. However, I have not tested all of them. I have tested infinite context generation and prompt travel; I have not tested ControlNet. If you find any bug, please report it to me.
 
-The difference between this extension and the official [HotShot-XL extension](https://github.com/hotshotco/Hotshot-XL-Automatic1111) is that - you can completely get rid of diffusers if you use this one.
+For download link, please read [Model Zoo](#model-zoo). For VRAM usage, please read [VRAM](#vram). For demo, please see [demo](#animatediff--sdxl).
 
-For download link, please read [Model Zoo](#model-zoo). For VRAM usage, please read [VRAM](#vram).
+
+## Optimizations
+Optimizations can be significantly helpful if you want to improve speed and reduce VRAM usage. With [attention optimization](#attention), [FP8](#fp8) and unchecking `Batch cond/uncond` in `Settings/Optimization`, I am able to run 4 x ControlNet + AnimateDiff + Stable Diffusion to generate 36 frames of 1024 * 1024 images with 18GB VRAM.
+
+### Attention
+Adding `--xformers` / `--opt-sdp-attention` to your command lines can significantly reduce VRAM and improve speed. However, due to a bug in xformers, you may or may not get CUDA error. If you get CUDA error, please either completely switch to `--opt-sdp-attention`, or preserve `--xformers` -> go to `Settings/AnimateDiff` -> choose "Optimize attention layers with sdp (torch >= 2.0.0 required)".
+
+### FP8
+FP8 requires torch >= 2.1.0 and WebUI [test-fp8](https://github.com/AUTOMATIC1111/stable-diffusion-webui/tree/test-fp8) branch by [@KohakuBlueleaf](https://github.com/KohakuBlueleaf). Follow these steps to enable FP8:
+1. Switch to `test-fp8` branch via `git checkout test-fp8` in your `stable-diffusion-webui` directory.
+1. Reinstall torch via adding `--reinstall-torch` ONCE to your command line arguments.
+1. Add `--opt-unet-fp8-storage` to your command line arguments and launch WebUI.
+
+### LCM
+[Latent Consistency Model](https://github.com/luosiallen/latent-consistency-model) is a recent breakthrough in Stable Diffusion community. I provide a "gift" to everyone who update this extension to >= [v1.12.1](https://github.com/continue-revolution/sd-webui-animatediff/releases/tag/v1.12.1) - you will find `LCM` sampler in the normal place you select samplers in WebUI. You can generate images / videos within 6-8 steps if you
+- select `Euler A` / `Euler` / `LCM` sampler (other samplers may also work, subject to further experiments)
+- use [LCM LoRA](https://civitai.com/models/195519/lcm-lora-weights-stable-diffusion-acceleration-module)
+- use a low CFG denoising strength (1-2 is recommended)
+
+Note that LCM sampler is still under experiment and subject to change adhering to [@luosiallen](https://github.com/luosiallen)'s wish.
+
+Benefits of using this extension instead of [sd-webui-lcm](https://github.com/0xbitches/sd-webui-lcm) are
+- you do not need to install diffusers
+- you can use LCM sampler with any other extensions, such as ControlNet and AnimateDiff
+
+### Others
+- Remove any VRAM heavy arguments such as `--no-half`. These arguments can significantly increase VRAM usage and reduce speed.
+- Check `Batch cond/uncond` in `Settings/Optimization` to improve speed; uncheck it to reduce VRAM usage.
 
 
 ## Model Zoo
-- `mm_sd_v14.ckpt` & `mm_sd_v15.ckpt` & `mm_sd_v15_v2.ckpt` by [@guoyww](https://github.com/guoyww): [Google Drive](https://drive.google.com/drive/folders/1EqLC65eR1-W-sGD0Im7fkED6c8GkiNFI) | [HuggingFace](https://huggingface.co/guoyww/animatediff/tree/main) | [CivitAI](https://civitai.com/models/108836)
+- `mm_sd_v14.ckpt` & `mm_sd_v15.ckpt` & `mm_sd_v15_v2.ckpt` & `mm_sdxl_v10_beta.ckpt` by [@guoyww](https://github.com/guoyww): [Google Drive](https://drive.google.com/drive/folders/1EqLC65eR1-W-sGD0Im7fkED6c8GkiNFI) | [HuggingFace](https://huggingface.co/guoyww/animatediff/tree/main) | [CivitAI](https://civitai.com/models/108836)
 - `mm_sd_v14.safetensors` & `mm_sd_v15.safetensors` & `mm_sd_v15_v2.safetensors` by [@neph1](https://github.com/neph1): [HuggingFace](https://huggingface.co/guoyww/animatediff/tree/refs%2Fpr%2F3)
 - `mm_sd_v14.fp16.safetensors` & `mm_sd_v15.fp16.safetensors` & `mm_sd_v15_v2.fp16.safetensors` by [@neggles](https://huggingface.co/neggles/): [HuggingFace](https://huggingface.co/neggles/)
 - `mm-Stabilized_high.pth` & `mm-Stabbilized_mid.pth` by [@manshoety](https://huggingface.co/manshoety): [HuggingFace](https://huggingface.co/manshoety/AD_Stabilized_Motion/tree/main)
@@ -229,6 +268,8 @@ The following data are SD1.5 + AnimateDiff, tested on Ubuntu 22.04, NVIDIA 4090,
 
 For SDXL + HotShot + SDP, tested on Ubuntu 22.04, NVIDIA 4090, torch 2.0.1+cu117, H=W=512, frame=8 (default setting), you need 8.66GB VRAM.
 
+For SDXL + AnimateDiff + SDP, tested on Ubuntu 22.04, NVIDIA 4090, torch 2.0.1+cu117, H=1024, W=768, frame=16, you need 13.87GB VRAM.
+
 
 ## Batch Size 
 Batch size on WebUI will be replaced by GIF frame number internally: 1 full GIF generated in 1 batch. If you want to generate multiple GIF at once, please change batch number. 
@@ -236,12 +277,6 @@ Batch size on WebUI will be replaced by GIF frame number internally: 1 full GIF 
 Batch number is NOT the same as batch size. In A1111 WebUI, batch number is above batch size. Batch number means the number of sequential steps, but batch size means the number of parallel steps. You do not have to worry too much when you increase batch number, but you do need to worry about your VRAM when you increase your batch size (where in this extension, video frame number). You do not need to change batch size at all when you are using this extension.
 
 We are currently developing approach to support batch size on WebUI in the near future.
-
-
-## FAQ
-1.  Q: Will ADetailer be supported?
-
-    A: I'm not planning to support ADetailer. However, I plan to refactor my [Segment Anything](https://github.com/continue-revolution/sd-webui-segment-anything) to achieve similar effects.
 
 
 ## Demo
@@ -261,6 +296,10 @@ We are currently developing approach to support batch size on WebUI in the near 
 
 The prompt is similar to [above](#prompt-travel).
 
+### AnimateDiff + SDXL
+You should be able to read infotext to understand how I generated this sample.
+![00025-1668075705](https://github.com/continue-revolution/sd-webui-animatediff/assets/63914308/6d32daf9-51c6-490f-a942-db36f84f23cf)
+
 ### ControlNet V2V
 TODO
 
@@ -274,7 +313,7 @@ I thank researchers from [Shanghai AI Lab](https://www.shlab.org.cn/), especiall
 
 I also thank community developers, especially
 - [@zappityzap](https://github.com/zappityzap) who developed the majority of the [output features](https://github.com/continue-revolution/sd-webui-animatediff/blob/master/scripts/animatediff_output.py)
-- [@TDS4874](https://github.com/TDS4874) and [@opparco](https://github.com/opparco) for resolving the grey issue which significantly improve the performance of this extension
+- [@TDS4874](https://github.com/TDS4874) and [@opparco](https://github.com/opparco) for resolving the grey issue which significantly improve the performance
 - [@talesofai](https://github.com/talesofai) who developed i2v in [this forked repo](https://github.com/talesofai/AnimateDiff)
 - [@rkfg](https://github.com/rkfg) for developing GIF palette optimization
 
